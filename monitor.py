@@ -1,4 +1,4 @@
-import requests, time, re, random, keyring, logging, json
+import requests, time, re, random, keyring, logging, json, os
 from tqdm import tqdm
 from bs4 import BeautifulSoup
 
@@ -29,11 +29,31 @@ min_sleep = int(input("Minimum sleep time (ex. 300): ")) # time in seconds, make
 max_sleep = int(input("Maximum sleep time (ex. 700): "))
 
 
+def get_credentials():
+    env_user = os.getenv('IS_MUNI_UCO')
+    env_password = os.getenv('IS_MUNI_PASSWORD')
 
-def login(session):
-    logging.info("Logging in...")
-    user = keyring.get_password('is-mon', 'uco')                # retrieve credentials from the python keyring library
+    if env_user and env_password:
+        logging.info('Loaded IS credentials from environment variables.')
+        return env_user, env_password
+
+    logging.info('Environment variables not set, attempting to load credentials from keyring.')
+    user = keyring.get_password('is-mon', 'uco')
     password = keyring.get_password('is-mon', 'password')
+
+    if user and password:
+        logging.info('Loaded IS credentials from keyring.')
+        return user, password
+
+    logging.warning('Credentials not found in env vars or keyring. Prompting for manual input.')
+    user = input('Enter your IS MUNI UCO: ')
+    password = input('Enter your IS MUNI password: ')
+    return user, password
+
+
+
+def login(session, user, password):
+    logging.info("Logging in...")
     while True:
         try:
             init = session.get(isl, allow_redirects=True)
@@ -239,7 +259,8 @@ while True:
 
 session = requests.Session()
 session.headers.update(user_agent)
-session = login(session)
+user, password = get_credentials()
+session = login(session, user, password)
 
 if mode == 1:
     monitor_notebook(session)

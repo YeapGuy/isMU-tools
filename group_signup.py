@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import datetime
+import os
 
 
 logging.basicConfig(level=logging.INFO)
@@ -14,6 +15,28 @@ user_agent = {'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 
 session = requests.Session()
 session.headers.update(user_agent)
+
+
+def get_credentials():
+    env_user = os.getenv('IS_MUNI_UCO')
+    env_password = os.getenv('IS_MUNI_PASSWORD')
+
+    if env_user and env_password:
+        logging.info('Loaded IS credentials from environment variables.')
+        return env_user, env_password
+
+    logging.info('Environment variables not set, attempting to load credentials from keyring.')
+    user = keyring.get_password('is-mon', 'uco')
+    password = keyring.get_password('is-mon', 'password')
+
+    if user and password:
+        logging.info('Loaded IS credentials from keyring.')
+        return user, password
+
+    logging.warning('Credentials not found in env vars or keyring. Prompting for manual input.')
+    user = input('Enter your IS MUNI uco: ')
+    password = input('Enter your IS MUNI password: ')
+    return user, password
 
 def login(session, user, password):
     logging.info("Logging in...")
@@ -70,15 +93,16 @@ def group_signup_repeat(group_link, group_num, session, sleep_time):
             logging.info(f"GRP-{group_num}: Unknown error, retrying...")
             time.sleep(sleep_time)
 
+user, password = get_credentials()
+
 while True:
-    user = input("Enter your IS MUNI uco: ")
-    password = input("Enter your IS MUNI password: ")
     session, return_code = login(session, user, password)
     if return_code == 0:
         logging.info("Login successful")
         break
-    elif return_code == 1:
-        logging.error("Login failed, invalid credentials, try inputting them again")
+    logging.error("Login failed, invalid credentials. Update your environment variables or keyring, or re-enter them now.")
+    user = input("Enter your IS MUNI uco: ")
+    password = input("Enter your IS MUNI password: ")
 
 
 groups = []
