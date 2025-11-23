@@ -192,7 +192,7 @@ def exam_signup(session):
         else:
             max_cap = ''
         current_cap = re.search(r'přihlášeno (\d+)', capacity_status)[1]
-        exam_entries[str(count)] = {
+        exam_entries[count] = {
             'date': exam_date,
             'status': exam_status,
             'link': exam_href,
@@ -202,51 +202,83 @@ def exam_signup(session):
         print(f'{count}: {exam_date}, CAPACITY: {current_cap}/{max_cap}')
         count += 1
 
-    # get input from the user about which exam date they want to register for
-    while True:
-        chosen_date = input(f'Please choose a date from the options above [0-{count}]: ').lower()
-        if int(chosen_date) > count or int(chosen_date) < 0:
-            logging.error('Invalid choice, please try again.')
-        else:    
-            break
+    if not exam_entries:
+        logging.info('No exam dates are currently available for this subject.')
+        exit(0)
 
-    logging.info('Trying to sign up...')
-    exam_link = exam_entries[chosen_date]['link']
-    if 'burza' in exam_link:
-        logging.error("You are already signed up for this exam date")
+    def parse_exam_choices(raw_choices, max_idx):
+        tokens = [token.strip() for token in raw_choices.split(',')]
+        parsed = []
+        for token in tokens:
+            if not token:
+                continue
+            if not token.isdigit():
+                raise ValueError('Choices must be numeric indices separated by commas.')
+            idx = int(token)
+            if idx < 0 or idx > max_idx:
+                raise ValueError(f'Choice {idx} is out of range. Valid range is 0-{max_idx}.')
+            parsed.append(idx)
+        if not parsed:
+            raise ValueError('At least one exam date must be selected.')
+        return sorted(set(parsed))
+
+    max_idx = count - 1
+    while True:
+        raw_choice = input(f'Choose one or more dates (comma-separated) [0-{max_idx}]: ')
+        try:
+            chosen_dates = parse_exam_choices(raw_choice, max_idx)
+            break
+        except ValueError as err:
+            logging.error(err)
+
+    selected_exams = {idx: exam_entries[idx] for idx in chosen_dates}
+    already_signed = [idx for idx, exam in selected_exams.items() if 'burza' in exam['link']]
+    if already_signed:
+        logging.error(f'You are already signed up for date(s): {", ".join(str(idx) for idx in already_signed)}. Remove them from your selection and try again.')
         exit(1)
 
+    logging.info(f'Monitoring {len(selected_exams)} exam date(s) for open capacity...')
+
     while True:
-        # this is the main loop where we try to sign up for the exam repeatedly
-        
-        signup_req = session.get(exam_link, timeout = 10)
-        soup = BeautifulSoup(signup_req.text, 'html.parser')
+        for idx, exam_data in selected_exams.items():
+            exam_link = exam_data['link']
 
-        # the user has successfully signed up
-        success_status = soup.find('div', {'class': 'zdurazneni potvrzeni'})
-        if success_status:
-            logging.info('Successfully signed up for the exam.')
-            embed = {'embeds':[{'title': "Exam signup",'color':7988011,'fields':[{'name':f'**{exam_entries[chosen_date]["date"]}**','value':"Signed up!"}]}]}
-            requests.post(webhook, json = embed)
-            break
+            try:
+                signup_req = session.get(exam_link, timeout = 10)
+            except Exception as e:
+                logging.error(f'Exception {e} occurred while checking {exam_data["date"]}. Moving to the next date.')
+                continue
 
-        # the user doesn't meet the requirements to sign up
-        notification_status = soup.find('div', {'class': 'zdurazneni upozorneni'})
-        if notification_status:
-            logging.error('You are already signed up for a different exam, please unsubscribe and try again.')
-            break
+            soup = BeautifulSoup(signup_req.text, 'html.parser')
 
-        # the exam is full
-        error_status = soup.find('div',{'class':'zdurazneni chyba'})
-        if error_status:
-            error_text = error_status.find('h3').text
-            if error_text == 'Na tento termín se nelze přihlásit. Kapacitní limit zkušebního termínu je již zaplněn.':
-                
-                # retrying in case someone drops their registration
-                sl_t = random.randint(min_sleep, max_sleep)
-                logging.error(f'Exam capacity is full. Sleeping for {sl_t} seconds.')
-                for i in tqdm(range(100)):
-                    time.sleep(sl_t/100)
+            # the user has successfully signed up
+            success_status = soup.find('div', {'class': 'zdurazneni potvrzeni'})
+            if success_status:
+                logging.info(f'Successfully signed up for the exam on {exam_data["date"]}.')
+                embed = {'embeds':[{'title': "Exam signup",'color':7988011,'fields':[{'name':f'**{exam_data["date"]}**','value':"Signed up!"}]}]}
+                requests.post(webhook, json = embed)
+                return
+
+            # the user doesn't meet the requirements to sign up
+            notification_status = soup.find('div', {'class': 'zdurazneni upozorneni'})
+            if notification_status:
+                logging.error('You are already signed up for a different exam, please unsubscribe and try again.')
+                return
+
+            # the exam is full or another error occurred
+            error_status = soup.find('div',{'class':'zdurazneni chyba'})
+            if error_status:
+                error_text = error_status.find('h3').text
+                if error_text == 'Na tento termín se nelze přihlásit. Kapacitní limit zkušebního termínu je již zaplněn.':
+
+                    logging.info(f'Exam on {exam_data["date"]} is still full.')
+                    continue
+                logging.error(f'Unexpected error for {exam_data["date"]}: {error_text}')
+
+        sl_t = random.randint(min_sleep, max_sleep)
+        logging.info(f'No availability detected. Sleeping for {sl_t} seconds before retrying all selected dates.')
+        for i in tqdm(range(100)):
+            time.sleep(sl_t/100)
 
 print('1: Notebook monitoring')
 print('2: Exam signup')
