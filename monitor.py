@@ -1,6 +1,7 @@
 import requests, time, re, random, keyring, logging, json, os
 from tqdm import tqdm
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 logging.basicConfig(level=logging.INFO)
 user_agent = {'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.71 Safari/537.36 Edg/94.0.992.38'}
@@ -132,6 +133,44 @@ def monitor_notebook(session):
 
 
 
+def submit_swap_confirmation(session, soup, exam_date):
+    form = soup.find('form')
+    if not form or not form.find('input', {'name': 'prehlasit'}):
+        return None
+
+    payload = {}
+    submit_fields = []
+    for field in form.find_all('input'):
+        name = field.get('name')
+        if not name:
+            continue
+        value = field.get('value', '')
+        if field.get('type', '').lower() == 'submit':
+            submit_fields.append((name, value))
+        else:
+            payload[name] = value
+
+    if not submit_fields:
+        # fallback if submit button is not explicitly marked, IS expects "button=Ano"
+        submit_fields.append(('button', 'Ano'))
+
+    for name, value in submit_fields:
+        payload[name] = value
+
+    action = form.get('action')
+    if not action:
+        return None
+
+    action_url = urljoin(exams_link, action)
+    logging.info(f'Confirmation required for {exam_date}. Attempting to submit swap form...')
+    try:
+        response = session.post(action_url, data=payload, timeout=10)
+    except Exception as exc:
+        logging.error(f'Failed to submit swap form: {exc}')
+        return None
+    return response
+
+
 def exam_signup(session):
     
     # fetch available subjects
@@ -183,9 +222,17 @@ def exam_signup(session):
     for entry in soup.find_all('tr',{'valign':'top'}):
         # retrieve information about the exam
         exam_status = entry.find_all('td')[0].text
-        exam_href = f"{exams_link}{entry.find_all('td')[2].find_all('font')[3].find('a')['href'][18:]}"
-        exam_date = entry.find_all('td')[2].find('b').text
-        capacity_status = entry.find_all('td')[2].text
+        details_cell = entry.find_all('td')[2]
+        exam_date = details_cell.find('b').text
+        capacity_status = details_cell.text
+
+        exam_href = None
+        for anchor in details_cell.find_all('a', href=True):
+            href = anchor['href']
+            if 'prihl_na_zkousky' in href and 'prihlasit' in href:
+                exam_href = urljoin(exams_link, href)
+                break
+
         max_cap = re.search(r'max. (\d+)', capacity_status)
         if max_cap:
             max_cap = max_cap[1]
@@ -199,7 +246,8 @@ def exam_signup(session):
             'max_capacity': max_cap,
             'current_signedup': current_cap
         }
-        print(f'{count}: {exam_date}, CAPACITY: {current_cap}/{max_cap}')
+        suffix = '' if exam_href else ' [already enrolled – swap only]'
+        print(f'{count}: {exam_date}, CAPACITY: {current_cap}/{max_cap}{suffix}')
         count += 1
 
     if not exam_entries:
@@ -232,7 +280,14 @@ def exam_signup(session):
             logging.error(err)
 
     selected_exams = {idx: exam_entries[idx] for idx in chosen_dates}
-    already_signed = [idx for idx, exam in selected_exams.items() if 'burza' in exam['link']]
+
+    no_link = [idx for idx, exam in selected_exams.items() if not exam['link']]
+    if no_link:
+        logging.error(f'Selected exam(s) {", ".join(str(idx) for idx in no_link)} cannot be auto-monitored because no signup link is available (you are likely already enrolled).')
+        logging.error('Please remove these selections or manually unenroll before running the script.')
+        exit(1)
+
+    already_signed = [idx for idx, exam in selected_exams.items() if exam['link'] and 'burza' in exam['link']]
     if already_signed:
         logging.error(f'You are already signed up for date(s): {", ".join(str(idx) for idx in already_signed)}. Remove them from your selection and try again.')
         exit(1)
@@ -262,7 +317,24 @@ def exam_signup(session):
             # the user doesn't meet the requirements to sign up
             notification_status = soup.find('div', {'class': 'zdurazneni upozorneni'})
             if notification_status:
-                logging.error('You are already signed up for a different exam, please unsubscribe and try again.')
+                swap_response = submit_swap_confirmation(session, soup, exam_data["date"])
+                if swap_response:
+                    swap_soup = BeautifulSoup(swap_response.text, 'html.parser')
+                    success_status = swap_soup.find('div', {'class': 'zdurazneni potvrzeni'})
+                    if success_status:
+                        logging.info(f'Successfully swapped to the exam on {exam_data["date"]}.')
+                        embed = {'embeds':[{'title': "Exam signup",'color':7988011,'fields':[{'name':f'**{exam_data["date"]}**','value':"Signed up!"}]}]}
+                        requests.post(webhook, json = embed)
+                        return
+
+                    error_status = swap_soup.find('div', {'class': 'zdurazneni chyba'})
+                    if error_status and error_status.find('h3'):
+                        logging.error(f'Swap failed for {exam_data["date"]}: {error_status.find("h3").text}')
+                    else:
+                        logging.error('Swap confirmation submitted but no success status was returned. Please verify manually.')
+                    return
+
+                logging.error('Swap confirmation required but could not be processed automatically. Please handle manually.')
                 return
 
             # the exam is full or another error occurred
